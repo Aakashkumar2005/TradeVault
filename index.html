@@ -268,8 +268,8 @@ table{width:100%;border-collapse:collapse}th,td{padding:11px 8px;border-bottom:1
    1) Demo/offline mode works immediately with localStorage.
    2) For real cross-device login/sync, configure Supabase below.
    ========================================================== */
-const SUPABASE_URL = "https://bacnhzcggxfzkcqiownh.supabase.co";       // https://YOURPROJECT.supabase.co
-const SUPABASE_ANON_KEY = "sb_publishable_A1JNdEnUnxlNy6VOJuz3wA_Qwq4zNWz";  // Supabase publishable/anon key
+const SUPABASE_URL = "https://bacnhzcggxfzkcqiownh.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_A1JNdEnUnxlNy6VOJuz3wA_Qwq4zNWz";
 const KEY='tradevault_v2';
 let supabaseClient = null;
 let cloudEnabled = false;
@@ -369,7 +369,7 @@ async function saveTrade(){
  if(!x.pair){alert('Enter a pair/instrument.');return}
  if(cloudEnabled){
    try{
-     if(pendingImageFile) x.screenshot=await uploadScreenshot(pendingImageFile,supabaseClient.auth.getUser? (await supabaseClient.auth.getUser()).data.user.id : state.user.id,x.id);
+     if(pendingImageFile){ const {data:{user}}=await supabaseClient.auth.getUser(); if(!user) throw new Error('Your login session has expired. Please sign in again.'); x.screenshot=await uploadScreenshot(pendingImageFile,user.id,x.id); }
      const {error}=await supabaseClient.from('trades').insert({
        id:x.id, trade_date:x.date, pair:x.pair, direction:x.dir, session:x.session, setup:x.setup, grade:x.grade,
        result:x.result, pnl:x.pnl, r_multiple:x.r, entry:x.entry, sl:x.sl, tp:x.tp, lots:x.lots, risk:x.risk,
@@ -431,6 +431,17 @@ async function authAction(){
 }
 function demoLogin(){state.user={name:'Demo Trader',email:'demo@tradevault.local',demo:true};save();enterApp()}
 
+function enterApp(){
+  document.getElementById('auth').style.display='none';
+  document.getElementById('app').style.display='flex';
+  renderAll();
+  const cs=document.getElementById('cloudStatus');
+  const sm=document.getElementById('storageMode');
+  if(cs) cs.textContent=cloudEnabled ? 'Cloud connected' : 'Local demo storage';
+  if(sm) sm.textContent=cloudEnabled ? 'Supabase cloud' : 'Local browser';
+}
+
+
 async function loadCloudUser(user){
  state.user={id:user.id,name:user.user_metadata?.display_name||user.email?.split('@')[0]||'Trader',email:user.email,demo:false};
  const [profileRes,tradesRes,psychRes,setupsRes]=await Promise.all([
@@ -444,20 +455,56 @@ async function loadCloudUser(user){
  }
  const p=profileRes.data;
  state.rules=p?{firm:p.firm||'FundingPips',model:p.model||'2-Step Flex',accountSize:Number(p.account_size||5000),dailyLimit:Number(p.daily_limit||4),maxLimit:Number(p.max_loss_limit||12),targetLimit:Number(p.target_limit||8)}:state.rules;
- if(!p) await supabaseClient.from('profiles').upsert({id:user.id,display_name:state.user.name});
+ if(!p) { const {error:profileError}=await supabaseClient.from('profiles').upsert({id:user.id,display_name:state.user.name},{onConflict:'id'}); if(profileError) console.error(profileError); }
  state.trades=(tradesRes.data||[]).map(t=>({id:t.id,date:t.trade_date,pair:t.pair,dir:t.direction,session:t.session,setup:t.setup,grade:t.grade,result:t.result,pnl:Number(t.pnl||0),r:Number(t.r_multiple||0),entry:t.entry,sl:t.sl,tp:t.tp,lots:t.lots,risk:t.risk,reason:t.reason,notes:t.notes,lesson:t.lesson,screenshot:t.screenshot_url,fomo:t.fomo,revenge:t.revenge,ruleViolation:t.rule_violation,discipline:t.discipline}));
  state.psych=(psychRes.data||[]).map(x=>({date:x.checkin_date,state:x.state,score:x.score,notes:x.notes}));
  state.setups=(setupsRes.data&&setupsRes.data.length)?setupsRes.data:state.setups.filter(s=>String(s.id).startsWith('local-'));
  save();enterApp()
 }
 async function initCloud(){
- if(!SUPABASE_URL||!SUPABASE_ANON_KEY){cloudEnabled=false;enterApp();return}
- supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
- cloudEnabled=true;
- cloudStatus.textContent='Cloud enabled';storageMode.textContent='Supabase cloud';
- const {data:{session}}=await supabaseClient.auth.getSession();
- if(session) await loadCloudUser(session.user); else {app.style.display='none';auth.style.display='flex'}
- supabaseClient.auth.onAuthStateChange((_event,session)=>{if(!session){state.user={name:'Demo Trader',email:'demo@tradevault.local',demo:true};save();app.style.display='none';auth.style.display='flex'}});
+  try{
+    if(!SUPABASE_URL || !SUPABASE_ANON_KEY || !window.supabase){
+      cloudEnabled=false;
+      enterApp();
+      return;
+    }
+    supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+    cloudEnabled=true;
+    document.getElementById('cloudStatus').textContent='Cloud connected';
+    document.getElementById('storageMode').textContent='Supabase cloud';
+
+    const {data:{session},error}=await supabaseClient.auth.getSession();
+    if(error){
+      console.error(error);
+      alert('Supabase connection failed: '+error.message);
+      cloudEnabled=false;
+      enterApp();
+      return;
+    }
+
+    if(session){
+      await loadCloudUser(session.user);
+    }else{
+      document.getElementById('app').style.display='none';
+      document.getElementById('auth').style.display='flex';
+    }
+
+    supabaseClient.auth.onAuthStateChange(async (_event,newSession)=>{
+      if(newSession){
+        await loadCloudUser(newSession.user);
+      }else{
+        state.user={name:'Demo Trader',email:'demo@tradevault.local',demo:true};
+        save();
+        document.getElementById('app').style.display='none';
+        document.getElementById('auth').style.display='flex';
+      }
+    });
+  }catch(e){
+    console.error(e);
+    cloudEnabled=false;
+    alert('TradeVault could not initialize Supabase: '+e.message);
+    enterApp();
+  }
 }
 async function logout(){
  if(cloudEnabled) await supabaseClient.auth.signOut();
